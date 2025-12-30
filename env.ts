@@ -13,6 +13,8 @@ if (isDevelopment) {
   loadEnv('test')
 }
 
+console.log('processs env', process.env.DATABASE_URL)
+
 const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
@@ -32,10 +34,17 @@ let env: Env
 
 try {
   env = envSchema.parse(process.env)
+  console.log('##env: ', env)
 } catch (e) {
+  console.log('##env', env)
   if (e instanceof z.ZodError) {
     console.log('Invalid env var')
-    console.error(JSON.stringify(e.flatten().fieldErrors, null, 2))
+    const { errors } = z.treeifyError(e)
+    console.log('------------------------------', JSON.stringify(errors))
+    errors.forEach((err) => {
+      console.log('##Error: ', err)
+      console.log('------------------------------')
+    })
 
     e.issues.forEach((err) => {
       const path = err.path.join('.')
