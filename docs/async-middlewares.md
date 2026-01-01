@@ -68,6 +68,190 @@ app.use(asyncHandler(async (req, res, next) => {
 }));
 ```
 
+#### 📚 Deep Dive: How asyncHandler Works
+
+Let's break down the `asyncHandler` wrapper function step by step:
+
+**The Problem It Solves:**
+Express doesn't automatically catch errors in async functions. If an async middleware throws an error, it results in an unhandled promise rejection, and Express won't trigger your error handlers.
+
+**The Solution - Step by Step:**
+
+```typescript
+const asyncHandler = (fn: Function) => {
+  // Step 1: asyncHandler takes your async middleware function as a parameter
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    // Step 2: Returns a new function that Express will actually use
+    // This returned function matches Express's middleware signature
+
+    Promise.resolve(fn(req, res, next)).catch(next);
+    // Step 3: Executes your async function and catches any errors
+  };
+};
+```
+
+**Breaking Down Step 3 - The Magic Line:**
+
+```typescript
+Promise.resolve(fn(req, res, next)).catch(next);
+```
+
+1. **`fn(req, res, next)`** - Calls your async middleware function
+   - Example: `async (req, res, next) => { await db.query(...) }`
+   - Returns a Promise (all async functions return promises)
+
+2. **`Promise.resolve(...)`** - Wraps the result in a Promise
+   - If `fn` is already async, this ensures we have a Promise
+   - If `fn` returns a value, it's wrapped in a resolved Promise
+   - Makes the code defensive and consistent
+
+3. **`.catch(next)`** - Catches any rejected promises (errors)
+   - If your async function throws an error, `.catch()` catches it
+   - Passes the error to `next(error)`, which triggers Express error handlers
+   - This is the key: converting promise rejections into Express-compatible errors
+
+**Visual Example:**
+
+```typescript
+// Your async middleware (what you write)
+async (req, res, next) => {
+  const user = await db.query('SELECT * FROM users WHERE id = ?', [req.userId]);
+  // ^ If this fails, it throws an error
+  req.user = user;
+  next();
+}
+
+// What asyncHandler converts it to (conceptually)
+(req, res, next) => {
+  Promise.resolve(
+    (async () => {
+      const user = await db.query('SELECT * FROM users WHERE id = ?', [req.userId]);
+      req.user = user;
+      next();
+    })()
+  )
+  .catch((error) => {
+    next(error); // Sends error to Express error handler
+  });
+}
+```
+
+**Execution Flow with Error:**
+
+```typescript
+app.use(asyncHandler(async (req, res, next) => {
+  const user = await db.query('SELECT * FROM users'); // This throws an error!
+  req.user = user;
+  next();
+}));
+
+// Step-by-step execution:
+// 1. asyncHandler is called with your async function
+// 2. Returns a wrapper function to Express
+// 3. Request comes in, wrapper executes
+// 4. Promise.resolve() starts your async function
+// 5. db.query() throws an error (Promise rejects)
+// 6. .catch(next) catches the error
+// 7. next(error) is called
+// 8. Express error handler receives the error ✅
+```
+
+**Without asyncHandler (The Problem):**
+
+```typescript
+app.use(async (req, res, next) => {
+  const user = await db.query('SELECT * FROM users'); // Throws error
+  req.user = user;
+  next();
+});
+
+// Step-by-step execution:
+// 1. Request comes in
+// 2. Async function executes
+// 3. db.query() throws an error (Promise rejects)
+// 4. ❌ Unhandled promise rejection!
+// 5. ❌ Express error handler is NOT called
+// 6. ❌ Server might crash or hang
+```
+
+**Why Promise.resolve() Instead of Just .catch()?**
+
+```typescript
+// This would work for async functions
+return (req, res, next) => {
+  fn(req, res, next).catch(next);
+};
+
+// But this is safer - handles both async and sync functions
+return (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
+// Example where Promise.resolve matters:
+const syncFn = (req, res, next) => {
+  throw new Error('Sync error'); // Not an async function
+};
+
+// Without Promise.resolve: error not caught
+fn(req, res, next).catch(next); // ❌ Sync errors don't have .catch
+
+// With Promise.resolve: error caught
+Promise.resolve(fn(req, res, next)).catch(next); // ✅ Works for both
+```
+
+**Real-World Comparison:**
+
+```typescript
+// ❌ Without asyncHandler - Verbose and repetitive
+app.use(async (req, res, next) => {
+  try {
+    const user = await db.query('SELECT * FROM users WHERE id = ?', [req.userId]);
+    req.user = user;
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.use(async (req, res, next) => {
+  try {
+    const habits = await db.query('SELECT * FROM habits WHERE user_id = ?', [req.userId]);
+    req.habits = habits;
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ✅ With asyncHandler - Clean and DRY (Don't Repeat Yourself)
+app.use(asyncHandler(async (req, res, next) => {
+  const user = await db.query('SELECT * FROM users WHERE id = ?', [req.userId]);
+  req.user = user;
+  next();
+}));
+
+app.use(asyncHandler(async (req, res, next) => {
+  const habits = await db.query('SELECT * FROM habits WHERE user_id = ?', [req.userId]);
+  req.habits = habits;
+  next();
+}));
+```
+
+**Key Takeaways:**
+
+1. `asyncHandler` is a **higher-order function** (takes a function, returns a function)
+2. It wraps your async middleware to catch promise rejections
+3. Converts async errors into Express-compatible error handling via `next(error)`
+4. Eliminates the need for try-catch blocks in every async middleware
+5. Makes your code cleaner, more maintainable, and less error-prone
+
+**Pro Tip:** Many popular libraries provide this functionality:
+- `express-async-handler` npm package
+- `express-async-errors` (patches Express globally)
+- Custom implementation (like above) for full control
+```
+
 ## Common Use Cases
 
 ### 1. Authentication Middleware
