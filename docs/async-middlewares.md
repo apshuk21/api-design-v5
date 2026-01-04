@@ -704,3 +704,276 @@ Key takeaways for asynchronous middlewares:
 7. **Be mindful of performance** - async operations add latency
 
 By following these patterns, your Express.js application will be more robust, maintainable, and easier to debug when dealing with asynchronous operations.
+
+---
+
+## Q&A: Common Misconceptions About asyncHandler
+
+### Question 1: How to Send a 500 Response in the Authenticate Middleware?
+
+**Context:** When using an authentication middleware with async operations (like JWT token verification), you need to handle different types of errors appropriately.
+
+**Answer:** Add try-catch blocks directly in the middleware to distinguish between different error types:
+
+```typescript
+import type { Request, Response, NextFunction } from 'express'
+import { verifyToken } from '../utils/jwt.ts'
+
+export interface AuthenticatedRequest extends Request {
+  user?: {
+    id: string
+    email: string
+    username: string
+  }
+}
+
+export const authenticate = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1]
+
+    if (!token) {
+      return res.status(401).json({ message: 'Unauthorized' })
+    }
+
+    const payload = await verifyToken(token)
+
+    req.user = {
+      id: payload.id,
+      email: payload.email,
+      username: payload.username,
+    }
+
+    next()
+  } catch (error) {
+    // Handle different error types appropriately
+    if (error instanceof Error && error.name === 'JWTExpired') {
+      return res.status(401).json({ message: 'Token expired' })
+    }
+    if (error instanceof Error && error.name === 'JWTInvalid') {
+      return res.status(401).json({ message: 'Invalid token' })
+    }
+    // For any other error (server issues, database errors, etc.), send 500
+    return res.status(500).json({ message: 'Internal server error' })
+  }
+}
+```
+
+**Key Points:**
+- Middleware handles its own errors with try-catch
+- Return appropriate status codes: 401 for auth issues, 500 for server errors
+- The middleware controls the response directly rather than relying on asyncHandler
+
+### Question 2: What is the Real Use Case of asyncHandler?
+
+**Common Mistake:** Wrapping middleware functions with asyncHandler
+
+```typescript
+// ❌ WRONG - Don't wrap middleware with asyncHandler
+router.get('/', asyncHandler(authenticate), (req, res) => {
+  res.json({ message: 'All habits' })
+})
+```
+
+**Why This Is Wrong:**
+1. The `asyncHandler` expects a function that returns `void`, but middleware should handle its own errors
+2. Middleware needs fine-grained control over responses (401 vs 500, specific error messages)
+3. Wrapping middleware with asyncHandler doesn't properly catch errors in the middleware execution
+
+**Correct Usage:** asyncHandler is for **route handlers**, NOT middleware
+
+```typescript
+// ✅ CORRECT - Middleware without asyncHandler
+router.get('/', authenticate, asyncHandler(async (req, res) => {
+  const habits = await db.habits.findMany() // async database call
+  res.json(habits)
+}))
+
+// ✅ CORRECT - Multiple route handlers with async operations
+router.post('/', asyncHandler(async (req, res) => {
+  const newHabit = await db.habits.create(req.body)
+  res.status(201).json(newHabit)
+}))
+
+router.put('/:id', asyncHandler(async (req, res) => {
+  const updatedHabit = await db.habits.update(req.params.id, req.body)
+  res.json(updatedHabit)
+}))
+```
+
+### Understanding the Difference
+
+**Middleware vs Route Handlers:**
+
+| Aspect | Middleware | Route Handler |
+|--------|-----------|---------------|
+| **Purpose** | Intercept requests, add context, validate auth | Handle the final request and send response |
+| **Error Handling** | Should handle its own errors with try-catch | Can use asyncHandler to catch errors |
+| **Response Control** | Often needs specific status codes (401, 403) | Usually 500 is fine for unexpected errors |
+| **Use asyncHandler?** | ❌ No - handle errors internally | ✅ Yes - for clean code |
+
+**Visual Comparison:**
+
+```typescript
+// Middleware Pattern (handles its own errors)
+export const authenticate = async (req, res, next) => {
+  try {
+    // Do async work
+    const user = await verifyToken(token)
+    req.user = user
+    next() // Pass to next middleware/handler
+  } catch (error) {
+    // Control the exact error response
+    return res.status(401).json({ message: 'Invalid token' })
+  }
+}
+
+// Route Handler Pattern (uses asyncHandler)
+router.get('/habits', authenticate, asyncHandler(async (req, res) => {
+  // If this throws, asyncHandler catches it and sends to error handler
+  const habits = await db.habits.findMany()
+  res.json(habits)
+}))
+```
+
+### Why asyncHandler Exists
+
+**The Problem It Solves:**
+
+Without `asyncHandler`, async route handlers require repetitive try-catch blocks:
+
+```typescript
+// ❌ Without asyncHandler - Repetitive and verbose
+router.get('/habits', authenticate, async (req, res) => {
+  try {
+    const habits = await db.habits.findMany()
+    res.json(habits)
+  } catch (error) {
+    res.status(500).json({ message: 'Internal server error' })
+  }
+})
+
+router.get('/habits/:id', authenticate, async (req, res) => {
+  try {
+    const habit = await db.habits.findById(req.params.id)
+    res.json(habit)
+  } catch (error) {
+    res.status(500).json({ message: 'Internal server error' })
+  }
+})
+
+// More routes... all with identical try-catch blocks
+```
+
+**With asyncHandler - Clean and DRY:**
+
+```typescript
+// ✅ With asyncHandler - Clean, consistent error handling
+router.get('/habits', authenticate, asyncHandler(async (req, res) => {
+  const habits = await db.habits.findMany()
+  res.json(habits)
+}))
+
+router.get('/habits/:id', authenticate, asyncHandler(async (req, res) => {
+  const habit = await db.habits.findById(req.params.id)
+  res.json(habit)
+}))
+
+// All errors automatically go to the central errorHandler middleware
+```
+
+**How It Works:**
+
+```typescript
+// Your asyncHandler implementation
+export const asyncHandler = (
+  fn: (req: Request, res: Response, next: NextFunction) => void
+) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next)
+  }
+}
+
+// Your centralized error handler (defined once in app setup)
+export const errorHandler = (
+  err: Error,
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  console.error(err)
+  res.status(500).json({ message: 'Internal Server Error' })
+}
+```
+
+When an async route handler throws an error:
+1. `asyncHandler` catches the promise rejection
+2. Calls `next(error)` to pass the error to Express
+3. Express routes it to your `errorHandler` middleware
+4. The centralized error handler sends the 500 response
+
+### Complete Example: Correct Usage Pattern
+
+```typescript
+// src/middlewares/auth.ts
+// Middleware - handles its own errors
+export const authenticate = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1]
+    if (!token) {
+      return res.status(401).json({ message: 'Unauthorized' })
+    }
+
+    const payload = await verifyToken(token)
+    req.user = payload
+    next()
+  } catch (error) {
+    // Specific error handling for auth failures
+    return res.status(401).json({ message: 'Invalid token' })
+  }
+}
+
+// src/routes/habitRoutes.ts
+// Route handlers - use asyncHandler
+router.get('/', authenticate, asyncHandler(async (req, res) => {
+  // If this throws, asyncHandler catches and sends to errorHandler
+  const habits = await db.habits.findMany({ userId: req.user.id })
+  res.json(habits)
+}))
+
+router.post('/', authenticate, asyncHandler(async (req, res) => {
+  // If validation or DB operation fails, errorHandler catches it
+  const habit = await db.habits.create({
+    ...req.body,
+    userId: req.user.id
+  })
+  res.status(201).json(habit)
+}))
+
+// src/app.ts or server.ts
+// Global error handler (placed after all routes)
+app.use((err, req, res, next) => {
+  console.error(err)
+  res.status(500).json({ message: 'Internal Server Error' })
+})
+```
+
+### Summary: When to Use What
+
+**Use Try-Catch in Middleware When:**
+- You need fine-grained control over error responses (401, 403, 400, etc.)
+- Different errors require different status codes
+- You're building reusable middleware (auth, validation, etc.)
+
+**Use asyncHandler in Route Handlers When:**
+- You have async operations in the final route handler
+- Generic 500 errors are acceptable for unexpected failures
+- You want cleaner, more maintainable code
+- You have a centralized error handler
+
+**Rule of Thumb:**
+- **Middleware** = Handle your own errors
+- **Route Handlers** = Use asyncHandler to delegate to error handler

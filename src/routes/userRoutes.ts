@@ -1,6 +1,9 @@
 import { Router } from 'express'
+import { authenticate } from '../middlewares/auth.ts'
 
 const router = Router()
+
+router.use(authenticate)
 
 router.get('/', (req, res) => {
   res.json({ message: 'All users' })
